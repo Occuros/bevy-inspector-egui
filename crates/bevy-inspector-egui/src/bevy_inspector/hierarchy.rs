@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use bevy_ecs::{prelude::*, query::QueryFilter};
+use bevy_ecs::query::QueryData;
 use bevy_hierarchy::{Children, Parent};
 use bevy_reflect::TypeRegistry;
 use egui::{CollapsingHeader, RichText};
@@ -36,6 +37,30 @@ pub struct Hierarchy<'a, T = ()> {
 }
 
 impl<T> Hierarchy<'_, T> {
+
+    pub fn show_with_query_state(&mut self, ui: &mut egui::Ui, entities: &mut Vec<Entity>) -> bool {
+        // let mut root_query = self.world.query_filtered::<Entity, (Without<Parent>, F)>();
+
+        let always_open: HashSet<Entity> = self
+            .selected
+            .iter()
+            .flat_map(|selected| {
+                std::iter::successors(Some(selected), |&entity| {
+                    self.world.get::<Parent>(entity).map(|parent| parent.get())
+                })
+                    .skip(1)
+            })
+            .collect();
+
+        // let mut entities: Vec<_> = root_query.iter(self.world).collect();
+        entities.sort();
+
+        let mut selected = false;
+        for entity in entities.iter() {
+            selected |= self.entity_ui(ui, *entity, &always_open, entities);
+        }
+        selected
+    }
     pub fn show<F: QueryFilter>(&mut self, ui: &mut egui::Ui) -> bool {
         let mut root_query = self.world.query_filtered::<Entity, (Without<Parent>, F)>();
 
