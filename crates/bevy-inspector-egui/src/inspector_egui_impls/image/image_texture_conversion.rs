@@ -1,7 +1,7 @@
+use bevy_image::{Image, TextureFormatPixelInfo};
 use bevy_render::{
     render_asset::RenderAssetUsages,
     render_resource::{Extent3d, TextureDimension, TextureFormat},
-    texture::{Image, TextureFormatPixelInfo},
 };
 use bytemuck::cast_slice;
 use image::{DynamicImage, ImageBuffer};
@@ -92,7 +92,7 @@ pub fn from_dynamic(dyn_img: DynamicImage, is_srgb: bool) -> Image {
                 let r = pixel[0];
                 let g = pixel[1];
                 let b = pixel[2];
-                let a = u16::max_value();
+                let a = u16::MAX;
 
                 local_data.extend_from_slice(&r.to_ne_bytes());
                 local_data.extend_from_slice(&g.to_ne_bytes());
@@ -123,7 +123,7 @@ pub fn from_dynamic(dyn_img: DynamicImage, is_srgb: bool) -> Image {
                 let r = pixel[0];
                 let g = pixel[1];
                 let b = pixel[2];
-                let a = u16::max_value();
+                let a = u16::MAX;
 
                 local_data.extend_from_slice(&r.to_ne_bytes());
                 local_data.extend_from_slice(&g.to_ne_bytes());

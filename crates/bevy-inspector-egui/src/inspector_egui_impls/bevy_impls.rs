@@ -54,7 +54,7 @@ impl InspectorPrimitive for Entity {
                 let entity_name =
                     crate::utils::guess_entity_name::guess_entity_name_restricted(world, entity);
                 egui::CollapsingHeader::new(entity_name)
-                    .id_source(id)
+                    .id_salt(id)
                     .show(ui, |ui| {
                         let _queue = CommandQueue::default();
                         crate::bevy_inspector::ui_for_entity_components(
@@ -107,7 +107,7 @@ impl InspectorPrimitive for Handle<Mesh> {
             }
         };
         let Some(mesh) = meshes.get_mut(handle) else {
-            dead_asset_handle(ui, handle.into());
+            dead_asset_handle(ui, handle.id().untyped());
             return false;
         };
 
@@ -140,7 +140,7 @@ impl InspectorPrimitive for Handle<Mesh> {
             Err(error) => return show_error(error, ui, "Assets<Mesh>"),
         };
         let Some(mesh) = meshes.get(self) else {
-            return dead_asset_handle(ui, self.into());
+            return dead_asset_handle(ui, self.id().untyped());
         };
 
         mesh_ui_inner(mesh, ui);

@@ -1,7 +1,10 @@
 //! Custom UI implementations for specific types. Check [`InspectorPrimitive`] for an example.
 
-use crate::reflect_inspector::{errors::no_multiedit, InspectorUi};
-use bevy_reflect::{FromType, Reflect, TypePath, TypeRegistry};
+use crate::{
+    reflect_inspector::{errors::no_multiedit, InspectorUi, ProjectorReflect},
+    utils::pretty_type_name,
+};
+use bevy_reflect::{FromType, PartialReflect, Reflect, TypePath, TypeRegistry};
 use bevy_utils::Instant;
 use std::{
     any::{Any, TypeId},
@@ -11,7 +14,7 @@ use std::{
 
 mod bevy_impls;
 mod glam_impls;
-#[cfg(feature = "bevy_render")]
+#[cfg(feature = "bevy_image")]
 mod image;
 mod std_impls;
 
@@ -24,8 +27,8 @@ type InspectorEguiImplFnMany = for<'a> fn(
     &dyn Any,
     egui::Id,
     InspectorUi<'_, '_>,
-    &mut [&mut dyn Reflect],
-    &dyn Fn(&mut dyn Reflect) -> &mut dyn Reflect,
+    &mut [&mut dyn PartialReflect],
+    &dyn ProjectorReflect,
 ) -> bool;
 
 /// Custom UI implementation for a concrete type.
@@ -86,19 +89,21 @@ fn ui_many_vtable<T: Reflect + PartialEq + Clone + Default + InspectorPrimitive>
     options: &dyn Any,
     id: egui::Id,
     env: InspectorUi<'_, '_>,
-    values: &mut [&mut dyn bevy_reflect::Reflect],
-    projector: &dyn Fn(&mut dyn bevy_reflect::Reflect) -> &mut dyn bevy_reflect::Reflect,
+    values: &mut [&mut dyn bevy_reflect::PartialReflect],
+    projector: &dyn ProjectorReflect,
 ) -> bool {
-    let same = crate::inspector_egui_impls::iter_all_eq(
-        values
-            .iter_mut()
-            .map(|value| projector(*value).downcast_ref::<T>().unwrap()),
-    );
+    let same = crate::inspector_egui_impls::iter_all_eq(values.iter_mut().map(|value| {
+        projector(*value)
+            .try_downcast_mut::<T>()
+            .expect("non-fully-reflected value passed to ui_many_vtable")
+    }));
 
     let mut temp = same.cloned().unwrap_or_default();
     if T::ui(&mut temp, ui, options, id, env) {
         for value in values.iter_mut() {
-            let value = projector(*value).downcast_mut::<T>().unwrap();
+            let value = projector(*value)
+                .try_downcast_mut::<T>()
+                .expect("non-fully-reflected value passed to ui_many_vtable");
             *value = temp.clone();
         }
 
@@ -200,8 +205,8 @@ impl InspectorEguiImpl {
         options: &dyn Any,
         id: egui::Id,
         env: InspectorUi<'_, '_>,
-        values: &mut [&mut dyn Reflect],
-        projector: &dyn Fn(&mut dyn Reflect) -> &mut dyn Reflect,
+        values: &mut [&mut dyn PartialReflect],
+        projector: &dyn ProjectorReflect,
     ) -> bool {
         (self.fn_many)(ui, options, id, env, values, projector)
     }
@@ -212,16 +217,14 @@ fn many_unimplemented<T: Any>(
     _options: &dyn Any,
     _id: egui::Id,
     _env: InspectorUi<'_, '_>,
-    _values: &mut [&mut dyn Reflect],
-    _projector: &dyn Fn(&mut dyn Reflect) -> &mut dyn Reflect,
+    _values: &mut [&mut dyn PartialReflect],
+    _projector: &dyn ProjectorReflect,
 ) -> bool {
-    no_multiedit(ui, &pretty_type_name::pretty_type_name::<T>());
+    no_multiedit(ui, &pretty_type_name::<T>());
     false
 }
 
-fn add<T: InspectorPrimitive + TypePath + PartialEq + Clone + Default>(
-    type_registry: &mut TypeRegistry,
-) {
+fn add<T: InspectorPrimitive + TypePath + PartialEq + Clone>(type_registry: &mut TypeRegistry) {
     type_registry.register_type_data::<T, InspectorEguiImpl>();
 }
 fn add_of_with_many<T: InspectorPrimitive>(
@@ -264,11 +267,16 @@ pub fn register_std_impls(type_registry: &mut TypeRegistry) {
     add::<bool>(type_registry);
     add::<String>(type_registry);
     add::<Cow<str>>(type_registry);
+    type_registry.register::<PathBuf>();
     add::<PathBuf>(type_registry);
 
     type_registry.register::<std::ops::Range<f64>>();
+    type_registry.register::<std::ops::RangeInclusive<f32>>();
+    type_registry.register::<std::ops::RangeInclusive<f64>>();
     add::<std::ops::Range<f32>>(type_registry);
     add::<std::ops::Range<f64>>(type_registry);
+    add::<std::ops::RangeInclusive<f32>>(type_registry);
+    add::<std::ops::RangeInclusive<f64>>(type_registry);
 
     add::<std::time::Duration>(type_registry);
     add_of_with_many::<Instant>(type_registry, many_unimplemented::<Instant>);
@@ -312,9 +320,12 @@ pub fn register_bevy_impls(type_registry: &mut TypeRegistry) {
 
     #[cfg(feature = "bevy_render")] 
     {
-      add_of_with_many::<bevy_asset::Handle<bevy_render::texture::Image>>(type_registry, many_unimplemented::<bevy_asset::Handle<bevy_render::texture::Image>>);
       add_of_with_many::<bevy_asset::Handle<bevy_render::mesh::Mesh>>(type_registry, many_unimplemented::<bevy_asset::Handle<bevy_render::mesh::Mesh>>);
       add::<bevy_render::view::RenderLayers>(type_registry);
+    }
+    #[cfg(feature = "bevy_image")]
+    {
+      add_of_with_many::<bevy_asset::Handle<bevy_image::Image>>(type_registry, many_unimplemented::<bevy_asset::Handle<bevy_image::Image>>);
     }
 }
 
@@ -373,19 +384,19 @@ macro_rules! many_ui {
             options: &dyn Any,
             id: egui::Id,
             env: InspectorUi<'_, '_>,
-            values: &mut [&mut dyn bevy_reflect::Reflect],
-            projector: &dyn Fn(&mut dyn bevy_reflect::Reflect) -> &mut dyn bevy_reflect::Reflect,
+            values: &mut [&mut dyn bevy_reflect::PartialReflect],
+            projector: &dyn crate::reflect_inspector::ProjectorReflect,
         ) -> bool {
             let same = $crate::inspector_egui_impls::iter_all_eq(
                 values
                     .iter_mut()
-                    .map(|value| projector(*value).downcast_ref::<$ty>().unwrap()),
+                    .map(|value| projector(*value).try_downcast_ref::<$ty>().unwrap()),
             );
 
             let mut temp = same.cloned().unwrap_or_default();
             if $inner(&mut temp, ui, options, id, env) {
                 for value in values.iter_mut() {
-                    let value = projector(*value).downcast_mut::<$ty>().unwrap();
+                    let value = projector(*value).try_downcast_mut::<$ty>().unwrap();
                     *value = temp.clone();
                 }
 

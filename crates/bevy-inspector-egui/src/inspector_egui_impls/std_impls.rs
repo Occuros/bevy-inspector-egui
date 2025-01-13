@@ -1,13 +1,16 @@
 use std::{borrow::Cow, ops::AddAssign, path::PathBuf};
 
-use bevy_reflect::{Reflect, TypePath};
+use bevy_reflect::{PartialReflect, Reflect, TypePath};
 use bevy_utils::Instant;
 use egui::{DragValue, RichText, TextBuffer};
 
 use super::{change_slider, iter_all_eq, InspectorPrimitive, InspectorUi};
-use crate::inspector_options::{
-    std_options::{NumberDisplay, NumberOptions, RangeOptions},
-    InspectorOptionsType,
+use crate::{
+    inspector_options::{
+        std_options::{NumberDisplay, NumberOptions, RangeOptions},
+        InspectorOptionsType,
+    },
+    reflect_inspector::ProjectorReflect,
 };
 use std::{any::Any, time::Duration};
 
@@ -170,8 +173,8 @@ pub fn number_ui_many<T>(
     _: &dyn Any,
     id: egui::Id,
     _env: InspectorUi<'_, '_>,
-    values: &mut [&mut dyn Reflect],
-    projector: &dyn Fn(&mut dyn Reflect) -> &mut dyn Reflect,
+    values: &mut [&mut dyn PartialReflect],
+    projector: &dyn ProjectorReflect,
 ) -> bool
 where
     T: Reflect + egui::emath::Numeric + AddAssign<T>,
@@ -179,13 +182,15 @@ where
     let same = iter_all_eq(
         values
             .iter_mut()
-            .map(|value| *projector(*value).downcast_ref::<T>().unwrap()),
+            .map(|value| *projector(*value).try_downcast_ref::<T>().unwrap()),
     )
     .map(T::to_f64);
 
     change_slider(ui, id, same, |change, overwrite| {
         for value in values.iter_mut() {
-            let value = projector(*value).downcast_mut::<T>().unwrap();
+            let value = projector(*value)
+                .try_downcast_mut::<T>()
+                .expect("non-fully-reflected value passed to number_ui_many");
             let change = T::from_f64(change);
             if overwrite {
                 *value = change;
@@ -397,6 +402,55 @@ fn display_range_readonly<T: egui::emath::Numeric + InspectorOptionsType>(
             number_ui_readonly::<T>(end, ui, end_options, id, env.reborrow());
         }
     });
+}
+
+impl<T: Reflect + TypePath + egui::emath::Numeric + InspectorOptionsType> InspectorPrimitive
+    for std::ops::RangeInclusive<T>
+{
+    fn ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        options: &dyn Any,
+        id: egui::Id,
+        env: InspectorUi<'_, '_>,
+    ) -> bool {
+        let mut start = *self.start();
+        let mut end = *self.end();
+
+        let changed = display_range::<T>(
+            ui,
+            options,
+            id,
+            env,
+            "..=",
+            Some(&mut start),
+            Some(&mut end),
+        );
+
+        if changed {
+            *self = start..=end;
+        }
+
+        changed
+    }
+
+    fn ui_readonly(
+        &self,
+        ui: &mut egui::Ui,
+        options: &dyn Any,
+        id: egui::Id,
+        env: InspectorUi<'_, '_>,
+    ) {
+        display_range_readonly::<T>(
+            ui,
+            options,
+            id,
+            env,
+            "..",
+            Some(self.start()),
+            Some(self.end()),
+        );
+    }
 }
 
 impl InspectorPrimitive for PathBuf {

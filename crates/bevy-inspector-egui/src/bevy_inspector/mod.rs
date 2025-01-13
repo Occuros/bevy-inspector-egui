@@ -7,7 +7,7 @@
 //! # use bevy_ecs::prelude::*;
 //! # use bevy_state::prelude::States;
 //! # use bevy_reflect::Reflect;
-//! # use bevy_render::prelude::Msaa;
+//! # use bevy_time::Time;
 //! # use bevy_math::Vec3;
 //!
 //! #[derive(States, Debug, Clone, Eq, PartialEq, Hash, Reflect, Default)]
@@ -17,8 +17,8 @@
 //!     let mut any_reflect_value = Vec3::new(1.0, 2.0, 3.0);
 //!     bevy_inspector::ui_for_value(&mut any_reflect_value, ui, world);
 //!
-//!     ui.heading("Msaa resource");
-//!     bevy_inspector::ui_for_resource::<Msaa>(world, ui);
+//!     ui.heading("Time resource");
+//!     bevy_inspector::ui_for_resource::<Time>(world, ui);
 //!
 //!     ui.heading("App State");
 //!     bevy_inspector::ui_for_state::<AppState>(world, ui);
@@ -39,6 +39,7 @@
 
 use std::any::TypeId;
 
+use crate::utils::{pretty_type_name, pretty_type_name_str};
 use bevy_asset::{Asset, AssetServer, Assets, ReflectAsset, UntypedAssetId};
 use bevy_ecs::query::{QueryFilter, WorldQuery};
 use bevy_ecs::world::CommandQueue;
@@ -48,7 +49,6 @@ use bevy_reflect::{Reflect, TypeRegistry};
 use bevy_state::state::{FreelyMutableState, NextState, State};
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
-use pretty_type_name::pretty_type_name;
 
 pub(crate) mod errors;
 
@@ -75,7 +75,7 @@ pub fn ui_for_value(value: &mut dyn Reflect, ui: &mut egui::Ui, world: &mut Worl
         queue: Some(&mut queue),
     };
     let mut env = InspectorUi::for_bevy(&type_registry, &mut cx);
-    let changed = env.ui_for_reflect(value, ui);
+    let changed = env.ui_for_reflect(value.as_partial_reflect_mut(), ui);
     queue.apply(world);
     changed
 }
@@ -194,7 +194,7 @@ pub fn ui_for_assets<A: Asset + Reflect>(world: &mut World, ui: &mut egui::Ui) {
         let id = egui::Id::new(handle_id);
 
         egui::CollapsingHeader::new(handle_name(handle_id.untyped(), asset_server.as_ref()))
-            .id_source(id)
+            .id_salt(id)
             .show(ui, |ui| {
                 let mut env = InspectorUi::for_bevy(&type_registry, &mut cx);
                 env.ui_for_reflect_with_options(asset, ui, id, &());
@@ -263,9 +263,7 @@ impl Filter {
             });
 
             // improves overall matching
-            let filter = filter.to_lowercase();
-
-            filter
+            filter.to_lowercase()
         };
 
         // filter kind
@@ -273,11 +271,11 @@ impl Filter {
             let filter_kind_id = egui::Id::new("world ui filter fuzzy");
             let mut is_fuzzy = ui.memory_mut(|mem| {
                 let fuzzy: &mut bool = mem.data.get_persisted_mut_or_default(filter_kind_id);
-                fuzzy.clone()
+                *fuzzy
             });
             ui.checkbox(&mut is_fuzzy, "Fuzzy Match");
             ui.memory_mut(|mem| {
-                *mem.data.get_persisted_mut_or_default(filter_kind_id) = is_fuzzy.clone();
+                *mem.data.get_persisted_mut_or_default(filter_kind_id) = is_fuzzy;
             });
             is_fuzzy
         };
@@ -328,7 +326,7 @@ pub fn ui_for_world_entities_filtered<F: WorldQuery + QueryFilter>(
         let entity_name = guess_entity_name(world, entity);
 
         egui::CollapsingHeader::new(&entity_name)
-            .id_source(id)
+            .id_salt(id)
             .show(ui, |ui| {
                 if with_children {
                     ui_for_entity_with_children_inner(
@@ -366,18 +364,20 @@ fn self_or_children_satisfy_filter(
         let matcher = SkimMatcherV2::default();
         matcher.fuzzy_match(name.as_str(), filter).is_some()
     } else {
-        name.to_lowercase().contains(&filter)
+        name.to_lowercase().contains(filter)
     };
     self_matches || {
-        world
+        let Ok(children) = world
             .query::<&Children>()
             .get(world, entity)
             .map(|children| children.to_vec())
-            .is_ok_and(|children| {
-                children
-                    .iter()
-                    .any(|child| self_or_children_satisfy_filter(world, *child, filter, is_fuzzy))
-            })
+        else {
+            return false;
+        };
+
+        children
+            .iter()
+            .any(|child| self_or_children_satisfy_filter(world, *child, filter, is_fuzzy))
     }
 }
 
@@ -429,7 +429,7 @@ fn ui_for_entity_with_children_inner(
 
                 let child_entity_name = guess_entity_name(world, child);
                 egui::CollapsingHeader::new(&child_entity_name)
-                    .id_source(id)
+                    .id_salt(id)
                     .show(ui, |ui| {
                         ui.label(&child_entity_name);
 
@@ -486,7 +486,7 @@ pub(crate) fn ui_for_entity_components(
     for (name, component_id, component_type_id, size) in components {
         let id = id.with(component_id);
 
-        let header = egui::CollapsingHeader::new(&name).id_source(id);
+        let header = egui::CollapsingHeader::new(&name).id_salt(id);
 
         let Some(component_type_id) = component_type_id else {
             header.show(ui, |ui| errors::no_type_id(ui, &name));
@@ -506,7 +506,7 @@ pub(crate) fn ui_for_entity_components(
             queue: queue.as_deref_mut(),
         };
 
-        let (value, is_changed, set_changed) = match component_view.get_entity_component_reflect(
+        let mut value = match component_view.get_entity_component_reflect(
             entity,
             component_type_id,
             type_registry,
@@ -518,7 +518,7 @@ pub(crate) fn ui_for_entity_components(
             }
         };
 
-        if is_changed {
+        if value.is_changed() {
             #[cfg(feature = "highlight_changes")]
             set_highlight_style(ui);
         }
@@ -527,10 +527,15 @@ pub(crate) fn ui_for_entity_components(
             ui.reset_style();
 
             let inspector_changed = InspectorUi::for_bevy(type_registry, &mut cx)
-                .ui_for_reflect_with_options(value, ui, id.with(component_id), &());
+                .ui_for_reflect_with_options(
+                    value.bypass_change_detection().as_partial_reflect_mut(),
+                    ui,
+                    id.with(component_id),
+                    &(),
+                );
 
             if inspector_changed {
-                set_changed();
+                value.set_changed();
             }
         });
         ui.reset_style();
@@ -572,7 +577,7 @@ fn components_of_entity(
         .components()
         .map(|component_id| {
             let info = world.world().components().get_info(component_id).unwrap();
-            let name = pretty_type_name::pretty_type_name_str(info.name());
+            let name = pretty_type_name_str(info.name());
 
             (name, component_id, info.type_id(), info.layout().size())
         })
@@ -618,7 +623,7 @@ pub fn ui_for_entities_shared_components(
     for (name, component_id, component_type_id, size) in components {
         let id = id.with(component_id);
         egui::CollapsingHeader::new(&name)
-            .id_source(id)
+            .id_salt(id)
             .show(ui, |ui| {
                 if size == 0 {
                     return;
@@ -628,7 +633,6 @@ pub fn ui_for_entities_shared_components(
                 };
 
                 let mut values = Vec::with_capacity(entities.len());
-                let mut mark_changeds = Vec::with_capacity(entities.len());
 
                 for (i, &entity) in entities.iter().enumerate() {
                     // skip duplicate entities
@@ -644,9 +648,8 @@ pub fn ui_for_entities_shared_components(
                             &type_registry,
                         )
                     } {
-                        Ok((value, mark_changed)) => {
+                        Ok(value) => {
                             values.push(value);
-                            mark_changeds.push(mark_changed);
                         }
                         Err(error) => {
                             errors::show_error(error, ui, &name);
@@ -655,17 +658,23 @@ pub fn ui_for_entities_shared_components(
                     }
                 }
 
+                let mut values_reflect: Vec<_> = values
+                    .iter_mut()
+                    .map(|value| value.bypass_change_detection().as_partial_reflect_mut())
+                    .collect();
                 let changed = env.ui_for_reflect_many_with_options(
                     component_type_id,
                     &name,
                     ui,
                     id.with(component_id),
                     &(),
-                    values.as_mut_slice(),
+                    values_reflect.as_mut_slice(),
                     &|a| a,
                 );
                 if changed {
-                    mark_changeds.into_iter().for_each(|f| f());
+                    for value in values.iter_mut() {
+                        value.set_changed();
+                    }
                 }
             });
     }
@@ -710,16 +719,19 @@ pub mod by_type_id {
             };
             let mut env = InspectorUi::for_bevy(type_registry, &mut cx);
 
-            let (resource, set_changed) = match resource_view
+            let mut resource = match resource_view
                 .get_resource_reflect_mut_by_id(resource_type_id, type_registry)
             {
                 Ok(resource) => resource,
                 Err(err) => return errors::show_error(err, ui, name_of_type),
             };
 
-            let changed = env.ui_for_reflect(resource, ui);
+            let changed = env.ui_for_reflect(
+                resource.bypass_change_detection().as_partial_reflect_mut(),
+                ui,
+            );
             if changed {
-                set_changed();
+                resource.set_changed();
             }
         }
 
@@ -771,10 +783,12 @@ pub mod by_type_id {
 
         for handle_id in ids {
             let id = egui::Id::new(handle_id);
-            let mut handle = reflect_handle.typed(UntypedHandle::Weak(handle_id));
+            let mut handle = reflect_handle
+                .typed(UntypedHandle::Weak(handle_id))
+                .into_partial_reflect();
 
             egui::CollapsingHeader::new(handle_name(handle_id, asset_server.as_ref()))
-                .id_source(id)
+                .id_salt(id)
                 .show(ui, |ui| {
                     let mut env = InspectorUi::for_bevy(type_registry, &mut cx);
                     env.ui_for_reflect_with_options(&mut *handle, ui, id, &());
@@ -830,7 +844,9 @@ pub mod by_type_id {
         };
 
         let id = egui::Id::new(handle);
-        let mut handle = reflect_handle.typed(UntypedHandle::Weak(handle));
+        let mut handle = reflect_handle
+            .typed(UntypedHandle::Weak(handle))
+            .into_partial_reflect();
 
         let mut env = InspectorUi::for_bevy(type_registry, &mut cx);
         let changed = env.ui_for_reflect_with_options(&mut *handle, ui, id, &());
@@ -880,22 +896,26 @@ pub mod short_circuit {
     use std::any::{Any, TypeId};
 
     use bevy_asset::ReflectAsset;
-    use bevy_reflect::Reflect;
+    use bevy_reflect::PartialReflect;
 
-    use crate::reflect_inspector::{Context, InspectorUi};
+    use crate::reflect_inspector::{Context, InspectorUi, ProjectorReflect};
 
     use super::errors::{self, name_of_type};
 
     pub fn short_circuit(
         env: &mut InspectorUi,
-        value: &mut dyn Reflect,
+        value: &mut dyn PartialReflect,
         ui: &mut egui::Ui,
         id: egui::Id,
         options: &dyn Any,
     ) -> Option<bool> {
+        let Some(value) = value.try_as_reflect() else {
+            return None;
+        };
+
         if let Some(reflect_handle) = env
             .type_registry
-            .get_type_data::<bevy_asset::ReflectHandle>(Any::type_id(value))
+            .get_type_data::<bevy_asset::ReflectHandle>(value.type_id())
         {
             let handle = reflect_handle
                 .downcast_handle_untyped(value.as_any())
@@ -952,7 +972,7 @@ pub mod short_circuit {
                 short_circuit_many: env.short_circuit_many,
             };
             return Some(restricted_env.ui_for_reflect_with_options(
-                asset_value,
+                asset_value.as_partial_reflect_mut(),
                 ui,
                 id.with("asset"),
                 options,
@@ -969,8 +989,8 @@ pub mod short_circuit {
         ui: &mut egui::Ui,
         id: egui::Id,
         options: &dyn Any,
-        values: &mut [&mut dyn Reflect],
-        projector: &dyn Fn(&mut dyn Reflect) -> &mut dyn Reflect,
+        values: &mut [&mut dyn PartialReflect],
+        projector: &dyn ProjectorReflect,
     ) -> Option<bool> {
         if let Some(reflect_handle) = env
             .type_registry
@@ -1005,6 +1025,11 @@ pub mod short_circuit {
 
             for value in values {
                 let handle = projector(*value);
+                let Some(handle) = handle.try_as_reflect() else {
+                    // Edge case, continue as normal:
+                    // this for loop should only work if we're multi-editing a bunch of Handles
+                    return None;
+                };
                 let handle = reflect_handle
                     .downcast_handle_untyped(handle.as_any())
                     .unwrap();
@@ -1030,7 +1055,7 @@ pub mod short_circuit {
                     }
                 };
 
-                new_values.push(asset_value);
+                new_values.push(asset_value.as_partial_reflect_mut());
             }
 
             let mut restricted_env = InspectorUi {
@@ -1059,14 +1084,18 @@ pub mod short_circuit {
 
     pub fn short_circuit_readonly(
         env: &mut InspectorUi,
-        value: &dyn Reflect,
+        value: &dyn PartialReflect,
         ui: &mut egui::Ui,
         id: egui::Id,
         options: &dyn Any,
     ) -> Option<()> {
+        let Some(value) = value.try_as_reflect() else {
+            return None;
+        };
+
         if let Some(reflect_handle) = env
             .type_registry
-            .get_type_data::<bevy_asset::ReflectHandle>(Any::type_id(value))
+            .get_type_data::<bevy_asset::ReflectHandle>(value.type_id())
         {
             let handle = reflect_handle
                 .downcast_handle_untyped(value.as_any())
@@ -1110,7 +1139,8 @@ pub mod short_circuit {
                         return Some(());
                     }
                 }
-            };
+            }
+            .as_partial_reflect();
 
             let mut restricted_env = InspectorUi {
                 type_registry: env.type_registry,

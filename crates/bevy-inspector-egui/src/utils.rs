@@ -1,14 +1,8 @@
-use bevy_ecs::change_detection::{DetectChangesMut, MutUntyped};
-use bevy_ecs::ptr::PtrMut;
-
-// workaround for https://github.com/bevyengine/bevy/pull/6430
-pub fn mut_untyped_split<'a>(mut mut_untyped: MutUntyped<'a>) -> (PtrMut<'a>, impl FnOnce() + 'a) {
-    // bypass_change_detection returns a `&mut PtrMut` which is basically useless, because all its methods take `self`
-    let ptr = mut_untyped.bypass_change_detection();
-    // SAFETY: this is exactly the same PtrMut, just not in a `&mut`. The old one is no longer accessible
-    let ptr = unsafe { PtrMut::new(std::ptr::NonNull::new_unchecked(ptr.as_ptr())) };
-
-    (ptr, move || mut_untyped.set_changed())
+pub fn pretty_type_name<T>() -> String {
+    format!("{:?}", disqualified::ShortName::of::<T>())
+}
+pub fn pretty_type_name_str(val: &str) -> String {
+    format!("{:?}", disqualified::ShortName(val))
 }
 
 pub mod guess_entity_name {
@@ -20,7 +14,7 @@ pub mod guess_entity_name {
     /// Guesses an appropriate entity name like `Light (6)` or falls back to `Entity (8)`
     pub fn guess_entity_name(world: &World, entity: Entity) -> String {
         match world.get_entity(entity) {
-            Some(entity_ref) => {
+            Ok(entity_ref) => {
                 if let Some(name) = entity_ref.get::<Name>() {
                     return format!("{} ({})", name.as_str(), entity);
                 }
@@ -31,7 +25,7 @@ pub mod guess_entity_name {
                     entity_ref.archetype(),
                 )
             }
-            None => format!("Entity {} (inexistent)", entity.index()),
+            Err(entity) => format!("Entity {} (inexistent)", entity.index()),
         }
     }
 
@@ -63,12 +57,15 @@ pub mod guess_entity_name {
             ("bevy_window::window::PrimaryWindow", "Primary Window"),
             ("bevy_core_pipeline::core_3d::camera_3d::Camera3d", "Camera3d"),
             ("bevy_core_pipeline::core_2d::camera_2d::Camera2d", "Camera2d"),
-            ("bevy_pbr::light::PointLight", "PointLight"),
-            ("bevy_pbr::light::DirectionalLight", "DirectionalLight"),
+            ("bevy_pbr::light::point_light::PointLight", "PointLight"),
+            ("bevy_pbr::light::directional_light::DirectionalLight", "DirectionalLight"),
             ("bevy_text::text::Text", "Text"),
             ("bevy_ui::ui_node::Node", "Node"),
             ("bevy_asset::handle::Handle<bevy_pbr::pbr_material::StandardMaterial>", "Pbr Mesh"),
             ("bevy_window::window::Window", "Window"),
+            ("bevy_ecs::observer::runner::ObserverState", "Observer"),
+            ("bevy_window::monitor::Monitor", "Monitor"),
+            ("bevy_picking::pointer::PointerId", "Pointer"),
         ];
 
         let type_names = archetype.components().filter_map(|id| {
